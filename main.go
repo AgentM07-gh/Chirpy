@@ -2,85 +2,62 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"sync/atomic"
 )
 
-// This struct holds data the server needs to remember
 type apiConfig struct {
-	fileserverHits atomic.Int32 // Thread-safe counter
-}
-
-// Middleware that increments the counter
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	// Return a new handler that wraps the original
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Before calling the original handler: increment counter
-		cfg.fileserverHits.Add(1)
-
-		// Call the original handler
-		next.ServeHTTP(w, r)
-
-		// After would go here (but we don't need it)
-	})
-}
-
-// Handler that shows the metrics
-func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-
-	// Load the current count (thread-safe read)
-	hits := cfg.fileserverHits.Load()
-
-	// Format and write the response
-	response := fmt.Sprintf("Hits: %d", hits)
-	w.Write([]byte(response))
-}
-
-// Handler that resets the counter
-func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-
-	// Reset to zero (thread-safe write)
-	cfg.fileserverHits.Store(0)
-
-	w.Write([]byte("Counter reset"))
+	fileserverHits atomic.Int32
 }
 
 func main() {
-	// Create the config struct (our memory box)
-	apiCfg := &apiConfig{}
+	const filepathRoot = "."
+	const port = "8080"
+
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+	}
 
 	mux := http.NewServeMux()
 
-	// Health check (same as Lab 4)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(200)
-		w.Write([]byte("OK"))
-	})
-
-	// Metrics endpoint - shows the count
-	mux.HandleFunc("/metrics", apiCfg.metricsHandler)
-
-	// Reset endpoint - resets the count
-	mux.HandleFunc("/reset", apiCfg.resetHandler)
-
-	// File server wrapped with middleware
-	fileServer := http.FileServer(http.Dir("."))
+	fileServer := http.FileServer(http.Dir(filepathRoot))
 	strippedHandler := http.StripPrefix("/app", fileServer)
+	mux.Handle("/app/", apiCfg.middlewareMetricsInc(strippedHandler))
 
-	// Wrap with middleware - now every request increments counter
-	wrappedHandler := apiCfg.middlewareMetricsInc(strippedHandler)
-
-	mux.Handle("/app/", wrappedHandler)
+	mux.HandleFunc("GET /healthz", healthzHandler)
+	mux.HandleFunc("GET /metrics", apiCfg.metricsHandler)
+	mux.HandleFunc("POST /reset", apiCfg.resetHandler)
 
 	server := &http.Server{
-		Addr:    ":8080",
+		Addr:    ":" + port,
 		Handler: mux,
 	}
+	log.Fatal(server.ListenAndServe())
+}
 
-	server.ListenAndServe()
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	hits := cfg.fileserverHits.Load()
+	message := fmt.Sprintf("Hits: %d", hits)
+	w.Write([]byte(message))
+}
+
+func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
+	cfg.fileserverHits.Store(0)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
