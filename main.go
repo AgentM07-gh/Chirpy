@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
 }
 
 func main() {
@@ -29,7 +35,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateHandler)
+	mux.HandleFunc("POST /api/validate_chirp", handlerChirpsValidate)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -38,60 +44,28 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-func validateHandler(w http.ResponseWriter, r *http.Request) {
+func handlerChirpsValidate(w http.ResponseWriter, r *http.Request) {
 	type Chirp struct {
 		Body string `json:"body"`
 	}
-	type ValidResponse struct {
-		Valid bool `json:"valid"`
-	}
-	type ErrorResponse struct {
-		Error string `json:"error"`
-	}
 
+	type CleanedResponse struct {
+		CleanedBody string `json:"cleaned_body"`
+	}
 	decoder := json.NewDecoder(r.Body)
 	chirp := Chirp{}
-	format_err := ErrorResponse{Error: "Something went wrong"}
-	len_err := ErrorResponse{Error: "Chirp is too long"}
-	valid := ValidResponse{Valid: true}
 	err := decoder.Decode(&chirp)
 	if err != nil {
-		dat, err := json.Marshal(format_err)
-		if err != nil {
-			log.Printf("Error marshalling JSON: %s", err)
-			w.WriteHeader(500)
-			return
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(400)
-			w.Write(dat)
-			return
-		}
-	} else if len(chirp.Body) > 140 {
-		dat, err := json.Marshal(len_err)
-		if err != nil {
-			log.Printf("Error marshalling JSON: %s", err)
-			w.WriteHeader(500)
-			return
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(400)
-			w.Write(dat)
-			return
-		}
-	}
-
-	dat, err := json.Marshal(valid)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		return
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
 		return
 	}
+	if len(chirp.Body) > 140 {
+		respondWithError(w, 400, "Chirp is too long")
+		return
+	}
+	clean := badWordReplacement(chirp.Body)
+	resp := CleanedResponse{CleanedBody: clean}
+	respondWithJSON(w, http.StatusOK, resp)
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -124,4 +98,34 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 		cfg.fileserverHits.Add(1)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func badWordReplacement(inputChirp string) string {
+	badWords := []string{"kerfuffle", "sharbert", "fornax"}
+	words := strings.Split(inputChirp, " ")
+	for i, value := range words {
+		if slices.Contains(badWords, strings.ToLower(value)) {
+			words[i] = "****"
+		}
+	}
+	cleanChirp := strings.Join(words, " ")
+	return cleanChirp
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	respondWithJSON(w, code, errorResponse{Error: msg})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// If marshalling fails, send a simple fallback
+		http.Error(w, "could not marshal JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(data)
 }
