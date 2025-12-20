@@ -7,21 +7,32 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/mail"
 	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
-type apiConfig struct {
-	fileserverHits atomic.Int32
-	dbQueries      *database.Queries
-}
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+type apiConfig struct {
+	fileserverHits atomic.Int32
+	db             *database.Queries
+	platform       string
 }
 
 func main() {
@@ -34,11 +45,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	dbQueries := database.New(db)
+
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
 
 	apiCfg := apiConfig{
 		fileserverHits: atomic.Int32{},
-		dbQueries:      dbQueries,
+		db:             dbQueries,
+		platform:       platform,
 	}
 
 	mux := http.NewServeMux()
@@ -51,6 +69,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/validate_chirp", handlerChirpsValidate)
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -75,7 +94,7 @@ func handlerChirpsValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(chirp.Body) > 140 {
-		respondWithError(w, 400, "Chirp is too long")
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
 	clean := badWordReplacement(chirp.Body)
@@ -104,6 +123,18 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Platform not DEV")
+		return
+	}
+
+	// delete all users via SQLC
+	err := cfg.db.Reset(r.Context()) // name will depend on your generated code
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not reset users")
+		return
+	}
+
 	cfg.fileserverHits.Store(0)
 	w.WriteHeader(http.StatusOK)
 }
@@ -143,4 +174,36 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	}
 
 	w.Write(data)
+}
+
+func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
+		return
+	}
+	_, eerr := mail.ParseAddress(params.Email)
+	if eerr != nil {
+		respondWithError(w, http.StatusBadRequest, "Not a valide email eddress")
+		return
+	}
+	dbUser, err := cfg.db.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		log.Println("CreateUser error:", err) // <-- add this
+		respondWithError(w, http.StatusInternalServerError, "Could not Create user and add to database")
+		return
+	}
+	httpUser := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+	respondWithJSON(w, http.StatusCreated, httpUser)
 }
