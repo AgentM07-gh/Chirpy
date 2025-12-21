@@ -68,8 +68,8 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", handlerChirpsValidate)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+	mux.HandleFunc("POST /api/chirps", apiCfg.chirps)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -78,14 +78,13 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-func handlerChirpsValidate(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
+
 	type Chirp struct {
-		Body string `json:"body"`
+		Body   string `json:"body"`
+		UserID string `json:"user_id"` // or uuid.UUID if you want to be type-safe
 	}
 
-	type CleanedResponse struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
 	decoder := json.NewDecoder(r.Body)
 	chirp := Chirp{}
 	err := decoder.Decode(&chirp)
@@ -97,9 +96,29 @@ func handlerChirpsValidate(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
+
 	clean := badWordReplacement(chirp.Body)
-	resp := CleanedResponse{CleanedBody: clean}
-	respondWithJSON(w, http.StatusOK, resp)
+
+	// Convert string UUID to uuid.UUID type
+	userUUID, err := uuid.Parse(chirp.UserID)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid user ID")
+		return
+	}
+
+	// Create the params using the generated struct
+	params := database.CreateChirpParams{
+		Body:   clean,
+		UserID: userUUID,
+	}
+
+	createdChirp, err := cfg.db.CreateChirp(r.Context(), params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create Chirp")
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, createdChirp)
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
