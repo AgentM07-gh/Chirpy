@@ -70,12 +70,22 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
 	mux.HandleFunc("POST /api/chirps", apiCfg.chirps)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirps)
 
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.db.GetAllChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+	respondWithJSON(w, http.StatusOK, dbChirps)
 }
 
 func (cfg *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
