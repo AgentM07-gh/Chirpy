@@ -71,12 +71,33 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
 	mux.HandleFunc("POST /api/chirps", apiCfg.chirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	cID, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid UUID")
+		return
+	}
+	dbChirp, err := cfg.db.GetChirp(r.Context(), cID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusNotFound, "Could not find Chirp")
+			return
+		} else {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
+	}
+	respondWithJSON(w, http.StatusOK, dbChirp)
 }
 
 func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
