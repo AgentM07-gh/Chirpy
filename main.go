@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Chirpy/internal/auth"
 	"Chirpy/internal/database"
 	"database/sql"
 	"encoding/json"
@@ -29,6 +30,7 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 }
+
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
@@ -72,12 +74,53 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.chirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
+	mux.HandleFunc("POST /api/login", apiCfg.userLogin)
 
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
+	type UserLogin struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	loginUser := UserLogin{}
+	err := decoder.Decode(&loginUser)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
+		return
+	}
+	_, eerr := mail.ParseAddress(loginUser.Email)
+	if eerr != nil {
+		respondWithError(w, http.StatusBadRequest, "Incorrect email or password")
+		return
+	}
+
+	dbUser, err := cfg.db.GetUserByEmail(r.Context(), loginUser.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	ok, err := auth.CheckPasswordHash(loginUser.Password, dbUser.HashedPassword)
+	if err != nil || !ok {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	httpUser := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, httpUser)
 }
 
 func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
@@ -227,23 +270,35 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 }
 
 func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Email string `json:"email"`
+	type newUser struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
+	nuser := newUser{}
+	err := decoder.Decode(&nuser)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
 		return
 	}
-	_, eerr := mail.ParseAddress(params.Email)
+	_, eerr := mail.ParseAddress(nuser.Email)
 	if eerr != nil {
 		respondWithError(w, http.StatusBadRequest, "Not a valide email eddress")
 		return
 	}
-	dbUser, err := cfg.db.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(nuser.Password)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Could Not hash password")
+		return
+	}
+
+	params := database.CreateUserParams{
+		Email:          nuser.Email,
+		HashedPassword: hashedPassword,
+	}
+
+	dbUser, err := cfg.db.CreateUser(r.Context(), params)
 	if err != nil {
 		log.Println("CreateUser error:", err) // <-- add this
 		respondWithError(w, http.StatusInternalServerError, "Could not Create user and add to database")
