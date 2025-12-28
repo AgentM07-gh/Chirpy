@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -69,5 +70,59 @@ func TestMakeAndValidateJWT_WrongSecret(t *testing.T) {
 	_, err = ValidateJWT(tokenString, wrongSecret)
 	if err == nil {
 		t.Fatalf("ValidateJWT failed with error: %v", err)
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	headers := http.Header{
+		"Authorization": []string{"Bearer some_token_here"},
+	}
+	token := "some_token_here"
+	bearerToken, err := GetBearerToken(headers)
+	if bearerToken != token {
+		t.Fatalf("Auth failed Expected %v, got %v", token, bearerToken)
+	}
+	if err != nil {
+		t.Fatalf("Auth failed with error: %v", err)
+	}
+}
+
+func TestGetBearerTokenWithSpaces(t *testing.T) {
+	headers := http.Header{
+		"Authorization": []string{"Bearer               some_token_here"},
+	}
+	token := "some_token_here"
+	bearerToken, err := GetBearerToken(headers)
+	if bearerToken != token {
+		t.Fatalf("Auth failed Expected %v, got %v", token, bearerToken)
+	}
+	if err != nil {
+		t.Fatalf("Auth failed with error: %v", err)
+	}
+}
+
+func TestGetBearerToken_Blank(t *testing.T) {
+	headers := http.Header{}
+	token := ""
+	bearerToken, err := GetBearerToken(headers)
+	if bearerToken != token {
+		t.Fatalf("Auth failed Expected %v, got %v", token, bearerToken)
+	}
+	if err == nil {
+		t.Fatalf("Auth failed with error: %v", err)
+	}
+}
+
+func TestGetBearerToken_NoBearer(t *testing.T) {
+	headers := http.Header{
+		"Authorization": []string{"    some_token_here"},
+	}
+	token := ""
+	bearerToken, err := GetBearerToken(headers)
+	if bearerToken != token {
+		t.Fatalf("Auth failed Expected %v, got %v", token, bearerToken)
+	}
+	if err == nil {
+		t.Fatalf("Auth failed with error: %v", err)
 	}
 }

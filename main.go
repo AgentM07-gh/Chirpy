@@ -29,20 +29,35 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	secret         string
 }
 
 func main() {
 	godotenv.Load()
+	err := godotenv.Load()
 	const filepathRoot = "."
 	const port = "8080"
+	currentDir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Error getting current working directory: %v", err)
+	}
+	fmt.Println("Current working directory:", currentDir)
+
+	loadErr := godotenv.Load()
+	if loadErr != nil {
+		log.Fatalf("Error loading .env file: %v", loadErr)
+	}
 
 	dbURL := os.Getenv("DB_URL")
+	JWL_SECRET := os.Getenv("API_SECRET")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
@@ -59,6 +74,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		db:             dbQueries,
 		platform:       platform,
+		secret:         JWL_SECRET,
 	}
 
 	mux := http.NewServeMux()
@@ -85,10 +101,10 @@ func main() {
 
 func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 	type UserLogin struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		ExpiresIn *int   `json:"expires_in_seconds"`
 	}
-
 	decoder := json.NewDecoder(r.Body)
 	loginUser := UserLogin{}
 	err := decoder.Decode(&loginUser)
@@ -96,10 +112,16 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
 		return
 	}
-	_, eerr := mail.ParseAddress(loginUser.Email)
-	if eerr != nil {
+	_, err = mail.ParseAddress(loginUser.Email)
+	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Incorrect email or password")
 		return
+	}
+
+	expires_in_seconds := 3600
+
+	if loginUser.ExpiresIn != nil && *loginUser.ExpiresIn != 0 && *loginUser.ExpiresIn < 3600 {
+		expires_in_seconds = *loginUser.ExpiresIn
 	}
 
 	dbUser, err := cfg.db.GetUserByEmail(r.Context(), loginUser.Email)
@@ -112,12 +134,19 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
 	}
+	duration := time.Duration(expires_in_seconds) * time.Second
+	userToken, err := auth.MakeJWT(dbUser.ID, cfg.secret, duration)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
 
 	httpUser := User{
 		ID:        dbUser.ID,
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		Token:     userToken,
 	}
 
 	respondWithJSON(w, http.StatusOK, httpUser)
@@ -155,8 +184,7 @@ func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
 
 	type Chirp struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"` // or uuid.UUID if you want to be type-safe
+		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -166,19 +194,37 @@ func (cfg *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Something went wrong")
 		return
 	}
-	if len(chirp.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	clean := badWordReplacement(chirp.Body)
-
+	userUUID, err := auth.ValidateJWT(bearerToken, cfg.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	/*()
 	// Convert string UUID to uuid.UUID type
 	userUUID, err := uuid.Parse(chirp.UserID)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid user ID")
 		return
 	}
+
+	if validatedUser != userUUID {
+		respondWithError(w, http.StatusUnauthorized, "Invalid Token")
+		return
+	}
+	*/
+	if len(chirp.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	clean := badWordReplacement(chirp.Body)
 
 	// Create the params using the generated struct
 	params := database.CreateChirpParams{
