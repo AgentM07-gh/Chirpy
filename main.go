@@ -30,6 +30,7 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 	Token     string    `json:"token"`
+	RefToken  string    `json:"refresh_token"`
 }
 
 type apiConfig struct {
@@ -91,6 +92,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	mux.HandleFunc("POST /api/login", apiCfg.userLogin)
+	mux.HandleFunc("POST /api/refresh", apiCfg.userRefreshToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.userRevokeRefreshToken)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -101,9 +104,9 @@ func main() {
 
 func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 	type UserLogin struct {
-		Email     string `json:"email"`
-		Password  string `json:"password"`
-		ExpiresIn *int   `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		//		ExpiresIn *int   `json:"expires_in_seconds"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	loginUser := UserLogin{}
@@ -118,11 +121,13 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expires_in_seconds := 3600
+	/*
+		expires_in_seconds := 3600
 
-	if loginUser.ExpiresIn != nil && *loginUser.ExpiresIn != 0 && *loginUser.ExpiresIn < 3600 {
-		expires_in_seconds = *loginUser.ExpiresIn
-	}
+		if loginUser.ExpiresIn != nil && *loginUser.ExpiresIn != 0 && *loginUser.ExpiresIn < 3600 {
+			expires_in_seconds = *loginUser.ExpiresIn
+		}
+	*/
 
 	dbUser, err := cfg.db.GetUserByEmail(r.Context(), loginUser.Email)
 	if err != nil {
@@ -134,10 +139,27 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
 	}
-	duration := time.Duration(expires_in_seconds) * time.Second
+	duration := time.Duration(3600) * time.Second
 	userToken, err := auth.MakeJWT(dbUser.ID, cfg.secret, duration)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	params := database.CreateRefreshTokenParams{
+		Token:  refreshToken,
+		UserID: dbUser.ID,
+	}
+
+	_, err = cfg.db.CreateRefreshToken(r.Context(), params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create RefreshToken")
 		return
 	}
 
@@ -147,6 +169,7 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
 		Token:     userToken,
+		RefToken:  refreshToken,
 	}
 
 	respondWithJSON(w, http.StatusOK, httpUser)
@@ -357,4 +380,44 @@ func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request)
 		Email:     dbUser.Email,
 	}
 	respondWithJSON(w, http.StatusCreated, httpUser)
+}
+
+func (cfg *apiConfig) userRefreshToken(w http.ResponseWriter, r *http.Request) {
+	type accessToken struct {
+		Token string `json:"token"`
+	}
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	userID, err := cfg.db.GetUserFromRefreshToken(r.Context(), bearerToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	duration := time.Duration(3600) * time.Second
+	newAccessToken, err := auth.MakeJWT(userID, cfg.secret, duration)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	userJWT := accessToken{
+		Token: newAccessToken,
+	}
+	respondWithJSON(w, http.StatusOK, userJWT)
+}
+
+func (cfg *apiConfig) userRevokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	err = cfg.db.RevokeRefreshToken(r.Context(), bearerToken)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not revoke token")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
