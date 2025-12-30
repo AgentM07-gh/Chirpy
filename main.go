@@ -94,12 +94,74 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.userLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.userRefreshToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.userRevokeRefreshToken)
+	mux.HandleFunc("PUT /api/users", apiCfg.userUpdate)
 
 	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+//------------------------------------------------------------------------
+
+func (cfg *apiConfig) userUpdate(w http.ResponseWriter, r *http.Request) {
+	type UserCreds struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	bearerToken, err := auth.GetBearerToken(r.Header)
+
+	userUUID, err := auth.ValidateJWT(bearerToken, cfg.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	user := UserCreds{}
+	err = decoder.Decode(&user)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
+		return
+	}
+	_, err = mail.ParseAddress(user.Email)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Not a valide email eddress")
+		return
+	}
+	hashedPassword, err := auth.HashPassword(user.Password)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Could Not hash password")
+		return
+	}
+
+	params := database.UpdateUserCredsParams{
+		ID:             userUUID,
+		Email:          user.Email,
+		HashedPassword: hashedPassword,
+	}
+	err = cfg.db.UpdateUserCreds(r.Context(), params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not update user in database")
+		return
+	}
+	dbUserUpdate, err := cfg.db.GetUserUpdateInfo(r.Context(), userUUID)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	type UserUpdateResponse struct {
+		Email   string `json:"email"`
+		Updated string `json:"updated"`
+	}
+	httpUser := UserUpdateResponse{
+		Email:   dbUserUpdate.Email,
+		Updated: dbUserUpdate.UpdatedAt.GoString(),
+	}
+
+	respondWithJSON(w, http.StatusOK, httpUser)
+
 }
 
 func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
