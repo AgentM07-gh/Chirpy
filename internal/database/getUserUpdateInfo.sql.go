@@ -13,17 +13,18 @@ import (
 )
 
 const getUserUpdateInfo = `-- name: GetUserUpdateInfo :one
-SELECT email, updated_at from users WHERE id = $1
+SELECT email, updated_at, is_chirpy_red from users WHERE id = $1
 `
 
 type GetUserUpdateInfoRow struct {
-	Email     string    `json:"email"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func (q *Queries) GetUserUpdateInfo(ctx context.Context, id uuid.UUID) (GetUserUpdateInfoRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserUpdateInfo, id)
 	var i GetUserUpdateInfoRow
-	err := row.Scan(&i.Email, &i.UpdatedAt)
+	err := row.Scan(&i.Email, &i.UpdatedAt, &i.IsChirpyRed)
 	return i, err
 }
