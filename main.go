@@ -12,6 +12,7 @@ import (
 	"net/mail"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secret         string
+	polka_key      string
 }
 
 func main() {
@@ -60,6 +62,7 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	JWL_SECRET := os.Getenv("API_SECRET")
+	polka_key := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -78,6 +81,7 @@ func main() {
 		db:             dbQueries,
 		platform:       platform,
 		secret:         JWL_SECRET,
+		polka_key:      polka_key,
 	}
 
 	mux := http.NewServeMux()
@@ -117,9 +121,17 @@ func (cfg *apiConfig) userUpdateToRed(w http.ResponseWriter, r *http.Request) {
 		Event string     `json:"event"`
 		Data  UserIdData `json:"data"`
 	}
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+	}
+	if apiKey != cfg.polka_key {
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	polkaEvent := PolkaEvent{}
-	err := decoder.Decode(&polkaEvent)
+	err = decoder.Decode(&polkaEvent)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid JSON Body")
 		return
@@ -343,11 +355,37 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := cfg.db.GetAllChirps(r.Context())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-		return
+	authID := r.URL.Query().Get("author_id")
+
+	var dbChirps []database.Chirp
+	var err error
+
+	if authID == "" {
+		dbChirps, err = cfg.db.GetAllChirps(r.Context())
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
+	} else {
+		userID, err := uuid.Parse(authID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid User ID")
+			return
+		}
+		dbChirps, err = cfg.db.GetAllChirpsFromUser(r.Context(), userID)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
 	}
+	sortType := r.URL.Query().Get("sort")
+	if sortType == "desc" {
+		sort.Slice(dbChirps, func(i, j int) bool {
+			return dbChirps[i].CreatedAt.After(dbChirps[j].CreatedAt)
+		})
+	}
+
+	// here you can use dbChirps once and respond
 	respondWithJSON(w, http.StatusOK, dbChirps)
 }
 
